@@ -57,7 +57,7 @@ warnings.filterwarnings(
     category=FutureWarning
 )
 
-RANDOM_STATE = 42
+RANDOM_STATE = 0
 INNER_FOLDS = 4
 OUTER_FOLDS = 5
 
@@ -699,23 +699,107 @@ print("R2:", best_row["Test R2"])
 # VISUALIZATION: MODEL COMPARISON
 # ============================================================
 
-plt.figure(figsize=(11, 6))
+comparison_algorithms = {
+    "Correlation": [
+        ["R&D Spend"],
+        ["R&D Spend", "Marketing Spend"],
+        ["R&D Spend", "Marketing Spend", "State_Florida"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_New York"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
+    ],
+    "Mutual Information": [
+        ["R&D Spend"],
+        ["R&D Spend", "Marketing Spend"],
+        ["R&D Spend", "Administration", "Marketing Spend"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
+    ],
+    "RFE": [
+        ["R&D Spend"],
+        ["R&D Spend", "Marketing Spend"],
+        ["R&D Spend", "Marketing Spend", "State_Florida"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
+    ],
+    "RFECV": [
+        ["R&D Spend"],
+        ["R&D Spend", "Marketing Spend"],
+        ["R&D Spend", "Marketing Spend", "State_Florida"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
+    ],
+    "LASSO": [
+        ["R&D Spend"],
+        ["R&D Spend", "State_New York"],
+        ["R&D Spend", "State_Florida", "State_New York"],
+        ["R&D Spend", "Administration", "State_Florida", "State_New York"],
+        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
+    ]
+}
 
-plt.bar(
-    comparison_df["Model"],
-    comparison_df["CV RMSE"]
-)
+styles = {
+    "Correlation": {"color": "#1f77b4", "marker": "o", "ms": 7, "lw": 2},
+    "Mutual Information": {"color": "#008b6b", "marker": "s", "ms": 6, "lw": 2},
+    "RFE": {"color": "#d97706", "marker": "^", "ms": 8, "lw": 2},
+    "RFECV": {"color": "#8a3ffc", "marker": "D", "ms": 6, "lw": 2},
+    "LASSO": {"color": "#d32f2f", "marker": "v", "ms": 7, "lw": 2}
+}
 
-plt.ylabel("Nested CV RMSE")
-plt.title("Feature Selection Method Comparison")
-plt.xticks(rotation=30, ha="right")
+k_vals = [1, 2, 3, 4, 5]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+for algo_name, subsets in comparison_algorithms.items():
+    algo_rmse = []
+    algo_r2 = []
+    for feats in subsets:
+        lr_sub = LinearRegression().fit(X_train[feats], y_train)
+        pred_sub = lr_sub.predict(X_test[feats])
+        algo_rmse.append(np.sqrt(np.mean((y_test - pred_sub) ** 2)))
+        algo_r2.append(lr_sub.score(X_test[feats], y_test))
+
+    st = styles[algo_name]
+    ax1.plot(
+        k_vals,
+        algo_rmse,
+        label=algo_name,
+        color=st["color"],
+        marker=st["marker"],
+        markersize=st["ms"],
+        linewidth=st["lw"]
+    )
+    ax2.plot(
+        k_vals,
+        algo_r2,
+        label=algo_name,
+        color=st["color"],
+        marker=st["marker"],
+        markersize=st["ms"],
+        linewidth=st["lw"]
+    )
+
+# Left plot: RMSE by Number of Features
+ax1.set_title("RMSE by Number of Features \u2014 All 5 Algorithms", fontsize=13, fontweight="bold", pad=12)
+ax1.set_xlabel("Number of Features", fontsize=11, fontweight="bold")
+ax1.set_ylabel("RMSE ($)", fontsize=11, fontweight="bold")
+ax1.set_xticks(k_vals)
+ax1.grid(True, linestyle="--", alpha=0.4, color="#d0d0d0")
+ax1.legend(loc="upper left", frameon=True, fontsize=9)
+
+# Right plot: R-squared by Number of Features
+ax2.set_title("R-squared by Number of Features \u2014 All 5 Algorithms", fontsize=13, fontweight="bold", pad=12)
+ax2.set_xlabel("Number of Features", fontsize=11, fontweight="bold")
+ax2.set_ylabel("R-squared", fontsize=11, fontweight="bold")
+ax2.set_xticks(k_vals)
+ax2.grid(True, linestyle="--", alpha=0.4, color="#d0d0d0")
+ax2.legend(loc="lower left", frameon=True, fontsize=9)
+
 plt.tight_layout()
-
 plt.savefig(
     OUTPUT_DIR / "model_comparison.png",
-    dpi=200
+    dpi=200,
+    bbox_inches="tight"
 )
-
 plt.show()
 
 
