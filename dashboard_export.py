@@ -1,5 +1,7 @@
 """Export real fitted models for the browser dashboard (no server required)."""
 import json
+import hashlib
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
@@ -53,4 +55,21 @@ def export_dashboard(curves, X_train, X_test, y_train, y_test, comparison):
     encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
     (output / "data.json").write_text(encoded, encoding="utf-8")
     (output / "data.js").write_text("window.DASHBOARD_DATA = " + encoded + ";\n", encoding="utf-8")
+    refresh_asset_versions(output)
     print("Interactive dashboard data exported:", output)
+
+
+def refresh_asset_versions(output=None):
+    """Match asset URLs to their content so browsers cannot reuse old JS/data."""
+    output = Path(output) if output is not None else Path(__file__).resolve().parent / "dashboard" / "dist"
+    index = output / "index.html"
+    if not index.exists():
+        return
+    versions = {name: hashlib.sha256((output / name).read_bytes()).hexdigest()[:12]
+                for name in ("app.js", "data.js", "styles.css")}
+    text = index.read_text(encoding="utf-8")
+    text = re.sub(
+        r'((?:src|href)=")(app\.js|data\.js|styles\.css)(?:\?v=[^"]*)?(")',
+        lambda match: f'{match[1]}{match[2]}?v={versions[match[2]]}{match[3]}', text
+    )
+    index.write_text(text, encoding="utf-8")
