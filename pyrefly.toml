@@ -1,0 +1,9 @@
+site_package_path = [
+    "C:/Users/user/AppData/Roaming/Python/Python314/site-packages",
+    "C:/Python314/Lib/site-packages",
+    "C:/ProgramData/anaconda3/Lib/site-packages"
+]
+
+search_path = [
+    "."
+]
