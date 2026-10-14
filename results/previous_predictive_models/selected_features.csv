@@ -1,0 +1,6 @@
+Model,Selected Features,Feature Count
+Lasso,"R&D Spend, Marketing Spend",2
+Linear Regression,"R&D Spend, Marketing Spend",2
+Ridge,"R&D Spend, Marketing Spend",2
+Elastic Net,"R&D Spend, Marketing Spend",2
+Random Forest,R&D Spend,1
