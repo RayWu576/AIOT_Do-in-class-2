@@ -1,7 +1,7 @@
 Model,Selected Features,Feature Count
 Baseline,"R&D Spend, Administration, Marketing Spend, State_Florida, State_New York",5
-Exhaustive,"R&D Spend, Marketing Spend",2
-Forward Selection,"R&D Spend, Marketing Spend",2
+Correlation,"R&D Spend, Marketing Spend",2
+Mutual Information,"R&D Spend, Marketing Spend",2
+RFE,"R&D Spend, Marketing Spend",2
 RFECV,"R&D Spend, Marketing Spend",2
-Lasso,"R&D Spend, Marketing Spend",2
-Backward Selection,"R&D Spend, Marketing Spend",2
+LASSO,"R&D Spend, Marketing Spend",2

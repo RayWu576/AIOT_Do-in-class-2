@@ -4,14 +4,13 @@
 # CRISP-DM + 5 FEATURE SELECTION METHODS
 #
 # M0: Baseline
-# M1: Exhaustive Feature Selection
-# M2: Sequential Forward Selection
-# M3: RFECV
-# M4: Lasso Feature Selection
-# M5: Sequential Backward Selection
+# M1: Correlation
+# M2: Mutual Information
+# M3: RFE
+# M4: RFECV
+# M5: LASSO
 # ============================================================
 
-import itertools
 import warnings
 from pathlib import Path
 
@@ -35,8 +34,9 @@ from sklearn.model_selection import (
 from sklearn.linear_model import LinearRegression, LassoCV
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import (
-    SequentialFeatureSelector,
-    RFECV
+    mutual_info_regression,
+    RFECV,
+    RFE
 )
 from sklearn.pipeline import Pipeline
 from sklearn.metrics import (
@@ -253,136 +253,92 @@ class BaseSubsetSelector(
 
 
 # ============================================================
-# M1: EXHAUSTIVE FEATURE SELECTION
+# FIXED-K SELECTION: CORRELATION, MUTUAL INFORMATION, RFE, LASSO
 # ============================================================
 
-class ExhaustiveSelector(BaseSubsetSelector):
-    """
-    Test every nonempty feature subset.
-    Select the subset with lowest CV RMSE.
+class FixedCountSelector(BaseSubsetSelector):
+    """Fit a feature selection method on training data for a specified k.
+
+    LASSO fixed-k curves rank absolute standardized LassoCV coefficients.
+    Zero-coefficient ties retain input column order. RFECV curves use the
+    fixed-k RFE elimination path; RFECV itself selects k by cross-validation.
     """
 
-    def __init__(self, cv=4):
+    def __init__(self, method="Correlation", k=1, cv=4):
+        self.method = method
+        self.k = k
         self.cv = cv
 
     def fit(self, X, y):
         self.n_features_in_ = X.shape[1]
+        if not 1 <= self.k <= self.n_features_in_:
+            raise ValueError("k must be between 1 and the number of features.")
+        values = np.asarray(X, dtype=float)
+        if self.k == self.n_features_in_:
+            self.selected_indices_ = np.arange(self.n_features_in_)
+            return self
 
-        cv = KFold(
-            n_splits=self.cv,
-            shuffle=True,
-            random_state=RANDOM_STATE
-        )
+        if self.method == "Correlation":
+            centered = values - values.mean(axis=0)
+            target = np.asarray(y) - np.mean(y)
+            denominator = np.sqrt((centered ** 2).sum(axis=0) * (target ** 2).sum())
+            scores = np.divide(
+                np.abs(centered.T @ target), denominator,
+                out=np.zeros(self.n_features_in_), where=denominator > 0
+            )
+        elif self.method == "Mutual Information":
+            # The two one-hot State columns are discrete features.
+            discrete = np.array([name.startswith("State_") for name in feature_names])
+            scores = mutual_info_regression(
+                values, y, discrete_features=discrete, random_state=RANDOM_STATE
+            )
+        elif self.method in ("RFE", "RFECV"):
+            scaled = StandardScaler().fit_transform(values)
+            selector = RFE(LinearRegression(), n_features_to_select=self.k, step=1)
+            selector.fit(scaled, y)
+            self.selected_indices_ = np.flatnonzero(selector.support_)
+            return self
+        elif self.method == "LASSO":
+            scaled = StandardScaler().fit_transform(values)
+            lasso = LassoCV(
+                cv=KFold(n_splits=self.cv, shuffle=True, random_state=RANDOM_STATE),
+                max_iter=100000, random_state=RANDOM_STATE
+            ).fit(scaled, y)
+            scores = np.abs(lasso.coef_)
+        else:
+            raise ValueError(f"Unknown selection method: {self.method}")
 
-        best_score = -np.inf
-        best_subset = None
-
-        for k in range(1, self.n_features_in_ + 1):
-            for subset in itertools.combinations(
-                range(self.n_features_in_), k
-            ):
-                X_subset = subset_columns(X, list(subset))
-
-                scores = cross_val_score(
-                    LinearRegression(),
-                    X_subset,
-                    y,
-                    cv=cv,
-                    scoring=SCORING
-                )
-
-                mean_score = scores.mean()
-
-                if mean_score > best_score:
-                    best_score = mean_score
-                    best_subset = subset
-
-        self.selected_indices_ = np.array(
-            best_subset,
-            dtype=int
-        )
-
+        self.selected_indices_ = np.argsort(-scores, kind="stable")[:self.k]
         return self
 
 
-# ============================================================
-# M2 / M5: FORWARD AND BACKWARD SELECTION
-# ============================================================
+class TunedCountSelector(BaseSubsetSelector):
+    """Choose k using training CV, refitting selection inside every fold."""
 
-class TunedSequentialSelector(BaseSubsetSelector):
-    """
-    Tune the number of selected features
-    using training-only cross-validation.
-    """
-
-    def __init__(self, direction="forward", cv=4):
-        self.direction = direction
+    def __init__(self, method="Correlation", cv=4):
+        self.method = method
         self.cv = cv
 
     def fit(self, X, y):
         self.n_features_in_ = X.shape[1]
-
-        cv = KFold(
-            n_splits=self.cv,
-            shuffle=True,
-            random_state=RANDOM_STATE
-        )
-
+        cv = KFold(n_splits=self.cv, shuffle=True, random_state=RANDOM_STATE)
         best_score = -np.inf
-        best_indices = None
-
-        # The full-feature model is also a candidate.
-        full_score = cross_val_score(
-            LinearRegression(),
-            X,
-            y,
-            cv=cv,
-            scoring=SCORING
-        ).mean()
-
-        best_score = full_score
-        best_indices = np.arange(self.n_features_in_)
-
-        for k in range(1, self.n_features_in_):
-
-            selector = SequentialFeatureSelector(
-                estimator=LinearRegression(),
-                n_features_to_select=k,
-                direction=self.direction,
-                scoring=SCORING,
-                cv=cv
-            )
-
-            selector.fit(X, y)
-
-            indices = np.where(
-                selector.get_support()
-            )[0]
-
-            X_subset = subset_columns(X, indices)
-
-            score = cross_val_score(
-                LinearRegression(),
-                X_subset,
-                y,
-                cv=cv,
-                scoring=SCORING
-            ).mean()
-
+        for k in range(1, self.n_features_in_ + 1):
+            candidate = Pipeline([
+                ("selector", FixedCountSelector(self.method, k, self.cv)),
+                ("regressor", LinearRegression())
+            ])
+            score = cross_val_score(candidate, X, y, cv=cv, scoring=SCORING).mean()
             if score > best_score:
                 best_score = score
-                best_indices = indices
-
-        self.selected_indices_ = np.asarray(
-            best_indices,
-            dtype=int
-        )
-
+                self.best_k_ = k
+        fitted = FixedCountSelector(self.method, self.best_k_, self.cv).fit(X, y)
+        self.selected_indices_ = fitted.selected_indices_
         return self
 
 
 # ============================================================
-# M3: RECURSIVE FEATURE ELIMINATION WITH CV
+# M4: RECURSIVE FEATURE ELIMINATION WITH CV
 # ============================================================
 
 class RFECVSelector(BaseSubsetSelector):
@@ -422,7 +378,7 @@ class RFECVSelector(BaseSubsetSelector):
 
 
 # ============================================================
-# M4: LASSO FEATURE SELECTION
+# M5: LASSO FEATURE SELECTION
 # ============================================================
 
 class LassoSelector(BaseSubsetSelector):
@@ -475,38 +431,20 @@ print("STEP 4: MODELING")
 print("=" * 65)
 
 models = {
-    "Baseline": Pipeline([
-        ("regressor", LinearRegression())
-    ]),
-
-    "Exhaustive": Pipeline([
-        ("selector", ExhaustiveSelector(cv=INNER_FOLDS)),
-        ("regressor", LinearRegression())
-    ]),
-
-    "Forward Selection": Pipeline([
-        ("selector", TunedSequentialSelector(
-            direction="forward",
-            cv=INNER_FOLDS
-        )),
-        ("regressor", LinearRegression())
-    ]),
-
+    "Baseline": Pipeline([("regressor", LinearRegression())]),
+    **{
+        name: Pipeline([
+            ("selector", TunedCountSelector(method=name, cv=INNER_FOLDS)),
+            ("regressor", LinearRegression())
+        ])
+        for name in ("Correlation", "Mutual Information", "RFE")
+    },
     "RFECV": Pipeline([
         ("selector", RFECVSelector(cv=INNER_FOLDS)),
         ("regressor", LinearRegression())
     ]),
-
-    "Lasso": Pipeline([
+    "LASSO": Pipeline([
         ("selector", LassoSelector(cv=INNER_FOLDS)),
-        ("regressor", LinearRegression())
-    ]),
-
-    "Backward Selection": Pipeline([
-        ("selector", TunedSequentialSelector(
-            direction="backward",
-            cv=INNER_FOLDS
-        )),
         ("regressor", LinearRegression())
     ])
 }
@@ -699,84 +637,53 @@ print("R2:", best_row["Test R2"])
 # VISUALIZATION: MODEL COMPARISON
 # ============================================================
 
-comparison_algorithms = {
-    "Correlation": [
-        ["R&D Spend"],
-        ["R&D Spend", "Marketing Spend"],
-        ["R&D Spend", "Marketing Spend", "State_Florida"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_New York"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
-    ],
-    "Mutual Information": [
-        ["R&D Spend"],
-        ["R&D Spend", "Marketing Spend"],
-        ["R&D Spend", "Administration", "Marketing Spend"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
-    ],
-    "RFE": [
-        ["R&D Spend"],
-        ["R&D Spend", "Marketing Spend"],
-        ["R&D Spend", "Marketing Spend", "State_Florida"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
-    ],
-    "RFECV": [
-        ["R&D Spend"],
-        ["R&D Spend", "Marketing Spend"],
-        ["R&D Spend", "Marketing Spend", "State_Florida"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
-    ],
-    "LASSO": [
-        ["R&D Spend"],
-        ["R&D Spend", "State_New York"],
-        ["R&D Spend", "State_Florida", "State_New York"],
-        ["R&D Spend", "Administration", "State_Florida", "State_New York"],
-        ["R&D Spend", "Administration", "Marketing Spend", "State_Florida", "State_New York"]
-    ]
-}
+# Select each subset using training data only. Test metrics are descriptive;
+# the best model above remains selected by nested training CV.
+comparison_algorithms = [
+    "Correlation", "Mutual Information", "RFE", "RFECV", "LASSO"
+]
+styles = [
+    {"color": "#1f77b4", "marker": "o"},
+    {"color": "#008b6b", "marker": "s"},
+    {"color": "#d97706", "marker": "^"},
+    {"color": "#8a3ffc", "marker": "D"},
+    {"color": "#d32f2f", "marker": "v"}
+]
+k_vals = list(range(1, X_train.shape[1] + 1))
+curve_rows = []
+for algo_name in comparison_algorithms:
+    for k in k_vals:
+        selector = FixedCountSelector(algo_name, k, INNER_FOLDS).fit(X_train, y_train)
+        indices = selector.selected_indices_
 
-styles = {
-    "Correlation": {"color": "#1f77b4", "marker": "o", "ms": 7, "lw": 2},
-    "Mutual Information": {"color": "#008b6b", "marker": "s", "ms": 6, "lw": 2},
-    "RFE": {"color": "#d97706", "marker": "^", "ms": 8, "lw": 2},
-    "RFECV": {"color": "#8a3ffc", "marker": "D", "ms": 6, "lw": 2},
-    "LASSO": {"color": "#d32f2f", "marker": "v", "ms": 7, "lw": 2}
-}
+        feats = X_train.columns[list(indices)].tolist()
+        regressor = LinearRegression().fit(X_train[feats], y_train)
+        predicted = regressor.predict(X_test[feats])
+        curve_rows.append({
+            "Model": algo_name,
+            "Features": k,
+            "Selected Features": ", ".join(feats),
+            "Test RMSE": np.sqrt(mean_squared_error(y_test, predicted)),
+            "Test R2": r2_score(y_test, predicted)
+        })
 
-k_vals = [1, 2, 3, 4, 5]
+curve_df = pd.DataFrame(curve_rows)
+curve_df.to_csv(OUTPUT_DIR / "feature_count_metrics.csv", index=False)
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+from dashboard_export import export_dashboard
+export_dashboard(curve_df, X_train, X_test, y_train, y_test, comparison_df)
+print("\n===== METRICS BY NUMBER OF FEATURES =====")
+print(curve_df.round(4).to_string(index=False))
 
-for algo_name, subsets in comparison_algorithms.items():
-    algo_rmse = []
-    algo_r2 = []
-    for feats in subsets:
-        lr_sub = LinearRegression().fit(X_train[feats], y_train)
-        pred_sub = lr_sub.predict(X_test[feats])
-        algo_rmse.append(np.sqrt(np.mean((y_test - pred_sub) ** 2)))
-        algo_r2.append(lr_sub.score(X_test[feats], y_test))
-
-    st = styles[algo_name]
-    ax1.plot(
-        k_vals,
-        algo_rmse,
-        label=algo_name,
-        color=st["color"],
-        marker=st["marker"],
-        markersize=st["ms"],
-        linewidth=st["lw"]
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
+for algo_name, style in zip(comparison_algorithms, styles):
+    points = curve_df[curve_df["Model"] == algo_name]
+    label = {"RFECV": "RFECV (RFE path)", "LASSO": "LASSO (coefficient ranking)"}.get(
+        algo_name, algo_name
     )
-    ax2.plot(
-        k_vals,
-        algo_r2,
-        label=algo_name,
-        color=st["color"],
-        marker=st["marker"],
-        markersize=st["ms"],
-        linewidth=st["lw"]
-    )
+    for ax, metric in ((ax1, "Test RMSE"), (ax2, "Test R2")):
+        ax.plot(points["Features"], points[metric], label=label,
+                linewidth=2, markersize=6, **style)
 
 # Left plot: RMSE by Number of Features
 ax1.set_title("RMSE by Number of Features \u2014 All 5 Algorithms", fontsize=13, fontweight="bold", pad=12)
