@@ -1,3 +1,4 @@
-Feature,Coefficient
-R&D Spend,0.7886182999424615
-Marketing Spend,0.03257662731702067
+name,estimate,se,t,p,low,high,vif
+Intercept,46347.32404432478,,,,,,
+R&D Spend,0.7886567851949307,,,,,,2.0989116309034443
+Marketing Spend,0.03255810922818597,,,,,,2.0989116309034443

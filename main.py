@@ -1,951 +1,171 @@
+"""Compare five predictive regressors using identical data and nested CV.
 
-# ============================================================
-# 50 STARTUPS - MULTIPLE LINEAR REGRESSION
-# CRISP-DM + 5 FEATURE SELECTION METHODS
-#
-# M0: Baseline
-# M1: Correlation
-# M2: Mutual Information
-# M3: RFE
-# M4: RFECV
-# M5: LASSO
-# ============================================================
-
-import warnings
+Run: python main.py
+Fixed-k plots use a common training-only Pearson ranking. Nested CV tunes
+both k and model hyperparameters without consulting the held-out test set.
+"""
+import json
 from pathlib import Path
-
-# pyrefly: ignore [missing-import]
+import joblib
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import joblib
-
-from scipy.stats import shapiro
-from sklearn.base import (
-    BaseEstimator,
-    TransformerMixin,
-    clone
-)
-from sklearn.model_selection import (
-    train_test_split,
-    cross_val_score,
-    KFold
-)
-from sklearn.linear_model import LinearRegression, LassoCV
-from sklearn.preprocessing import StandardScaler
-from sklearn.feature_selection import (
-    mutual_info_regression,
-    RFECV,
-    RFE
-)
+from sklearn.base import clone
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.feature_selection import SelectKBest, f_regression
+from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split, KFold, GridSearchCV, cross_val_score
 from sklearn.pipeline import Pipeline
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score
-)
-
-import statsmodels.api as sm
-from statsmodels.stats.diagnostic import het_breuschpagan
-from statsmodels.stats.stattools import durbin_watson
-from statsmodels.stats.outliers_influence import (
-    variance_inflation_factor
-)
-
-warnings.filterwarnings(
-    "ignore",
-    category=FutureWarning
-)
-
-RANDOM_STATE = 0
-INNER_FOLDS = 4
-OUTER_FOLDS = 5
-
-OUTPUT_DIR = Path("results")
-OUTPUT_DIR.mkdir(exist_ok=True)
-
-
-# ============================================================
-# STEP 1: BUSINESS UNDERSTANDING
-# ============================================================
-
-print("\n" + "=" * 65)
-print("STEP 1: BUSINESS UNDERSTANDING")
-print("=" * 65)
-
-print("Objective: Predict startup profit.")
-print("Task: Multiple Linear Regression")
-print("Target: Profit")
-print("Compare five feature selection algorithms.")
-
-
-# ============================================================
-# STEP 2: DATA UNDERSTANDING
-# ============================================================
-
-print("\n" + "=" * 65)
-print("STEP 2: DATA UNDERSTANDING")
-print("=" * 65)
-
-df = pd.read_csv("50_Startups.csv")
-df.columns = df.columns.str.strip()
-
-required_columns = [
-    "R&D Spend",
-    "Administration",
-    "Marketing Spend",
-    "State",
-    "Profit"
-]
-
-if not set(required_columns).issubset(df.columns):
-    raise ValueError("Missing required dataset columns.")
-
-df = df[required_columns].copy()
-
-print("\nFirst 5 Rows:")
-print(df.head())
-
-print("\nDataset Shape:", df.shape)
-
-print("\nMissing Values:")
-print(df.isnull().sum())
-
-print("\nStatistical Summary:")
-print(df.describe(include="all"))
-
-print("\nCorrelation Matrix:")
-print(
-    df.select_dtypes(include=np.number)
-    .corr()
-    .round(3)
-)
-
-# Correlation visualization
-corr = df.select_dtypes(include=np.number).corr()
-
-fig, ax = plt.subplots(figsize=(8, 6))
-im = ax.imshow(corr, cmap="coolwarm", vmin=-1, vmax=1)
-
-ax.set_xticks(range(len(corr.columns)))
-ax.set_yticks(range(len(corr.columns)))
-ax.set_xticklabels(corr.columns, rotation=35, ha="right")
-ax.set_yticklabels(corr.columns)
-
-for i in range(len(corr)):
-    for j in range(len(corr)):
-        ax.text(
-            j, i,
-            f"{corr.iloc[i, j]:.2f}",
-            ha="center",
-            va="center"
-        )
-
-plt.colorbar(im, ax=ax)
-plt.title("Correlation Matrix")
-plt.tight_layout()
-plt.savefig(OUTPUT_DIR / "correlation.png", dpi=200)
-plt.show()
-
-
-# ============================================================
-# STEP 3: DATA PREPARATION
-# ============================================================
-
-print("\n" + "=" * 65)
-print("STEP 3: DATA PREPARATION")
-print("=" * 65)
-
-df = df.drop_duplicates().dropna()
-
-# Explicit categories ensure stable dummy columns.
-states = ["California", "Florida", "New York"]
-
-if not df["State"].isin(states).all():
-    raise ValueError("Unexpected State category.")
-
-df["State"] = pd.Categorical(
-    df["State"],
-    categories=states
-)
-
-# One-hot encoding using known categories.
-# California becomes the reference category.
-X = pd.get_dummies(
-    df.drop(columns="Profit"),
-    columns=["State"],
-    drop_first=True,
-    dtype=float
-)
-
-y = df["Profit"]
-
-feature_names = X.columns.tolist()
-
-print("\nEncoded Features:")
-for i, name in enumerate(feature_names, start=1):
-    print(f"{i}. {name}")
-
-print("\nTotal Features:", X.shape[1])
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=RANDOM_STATE
-)
-
-print("\nTraining Samples:", len(X_train))
-print("Testing Samples:", len(X_test))
-
-# NOTE:
-# One-hot mapping is fixed in advance.
-# Feature selection and model fitting occur
-# inside cross-validation training folds.
-
-inner_cv = KFold(
-    n_splits=INNER_FOLDS,
-    shuffle=True,
-    random_state=RANDOM_STATE
-)
-
-outer_cv = KFold(
-    n_splits=OUTER_FOLDS,
-    shuffle=True,
-    random_state=RANDOM_STATE
-)
-
-SCORING = "neg_root_mean_squared_error"
-
-
-# ============================================================
-# FEATURE SELECTION HELPER
-# ============================================================
-
-def subset_columns(X, indices):
-    """Select columns by integer positions."""
-    if isinstance(X, pd.DataFrame):
-        return X.iloc[:, indices]
-
-    return np.asarray(X)[:, indices]
-
-
-class BaseSubsetSelector(
-    BaseEstimator,
-    TransformerMixin
-):
-    selected_indices_: np.ndarray
-    n_features_in_: int
-
-    def transform(self, X):
-        return subset_columns(
-            X,
-            self.selected_indices_
-        )
-
-    def get_support(self):
-        mask = np.zeros(
-            self.n_features_in_,
-            dtype=bool
-        )
-        mask[self.selected_indices_] = True
-        return mask
-
-
-# ============================================================
-# FIXED-K SELECTION: CORRELATION, MUTUAL INFORMATION, RFE, LASSO
-# ============================================================
-
-class FixedCountSelector(BaseSubsetSelector):
-    """Fit a feature selection method on training data for a specified k.
-
-    LASSO fixed-k curves rank absolute standardized LassoCV coefficients.
-    Zero-coefficient ties retain input column order. RFECV curves use the
-    fixed-k RFE elimination path; RFECV itself selects k by cross-validation.
-    """
-
-    def __init__(self, method="Correlation", k=1, cv=4):
-        self.method = method
-        self.k = k
-        self.cv = cv
-
-    def fit(self, X, y):
-        self.n_features_in_ = X.shape[1]
-        if not 1 <= self.k <= self.n_features_in_:
-            raise ValueError("k must be between 1 and the number of features.")
-        values = np.asarray(X, dtype=float)
-        if self.k == self.n_features_in_:
-            self.selected_indices_ = np.arange(self.n_features_in_)
-            return self
-
-        if self.method == "Correlation":
-            centered = values - values.mean(axis=0)
-            target = np.asarray(y) - np.mean(y)
-            denominator = np.sqrt((centered ** 2).sum(axis=0) * (target ** 2).sum())
-            scores = np.divide(
-                np.abs(centered.T @ target), denominator,
-                out=np.zeros(self.n_features_in_), where=denominator > 0
-            )
-        elif self.method == "Mutual Information":
-            # The two one-hot State columns are discrete features.
-            discrete = np.array([name.startswith("State_") for name in feature_names])
-            scores = mutual_info_regression(
-                values, y, discrete_features=discrete, random_state=RANDOM_STATE
-            )
-        elif self.method in ("RFE", "RFECV"):
-            scaled = StandardScaler().fit_transform(values)
-            selector = RFE(LinearRegression(), n_features_to_select=self.k, step=1)
-            selector.fit(scaled, y)
-            self.selected_indices_ = np.flatnonzero(selector.support_)
-            return self
-        elif self.method == "LASSO":
-            scaled = StandardScaler().fit_transform(values)
-            lasso = LassoCV(
-                cv=KFold(n_splits=self.cv, shuffle=True, random_state=RANDOM_STATE),
-                max_iter=100000, random_state=RANDOM_STATE
-            ).fit(scaled, y)
-            scores = np.abs(lasso.coef_)
-        else:
-            raise ValueError(f"Unknown selection method: {self.method}")
-
-        self.selected_indices_ = np.argsort(-scores, kind="stable")[:self.k]
-        return self
-
-
-class TunedCountSelector(BaseSubsetSelector):
-    """Choose k using training CV, refitting selection inside every fold."""
-
-    def __init__(self, method="Correlation", cv=4):
-        self.method = method
-        self.cv = cv
-
-    def fit(self, X, y):
-        self.n_features_in_ = X.shape[1]
-        cv = KFold(n_splits=self.cv, shuffle=True, random_state=RANDOM_STATE)
-        best_score = -np.inf
-        for k in range(1, self.n_features_in_ + 1):
-            candidate = Pipeline([
-                ("selector", FixedCountSelector(self.method, k, self.cv)),
-                ("regressor", LinearRegression())
-            ])
-            score = cross_val_score(candidate, X, y, cv=cv, scoring=SCORING).mean()
-            if score > best_score:
-                best_score = score
-                self.best_k_ = k
-        fitted = FixedCountSelector(self.method, self.best_k_, self.cv).fit(X, y)
-        self.selected_indices_ = fitted.selected_indices_
-        return self
-
-
-# ============================================================
-# M4: RECURSIVE FEATURE ELIMINATION WITH CV
-# ============================================================
-
-class RFECVSelector(BaseSubsetSelector):
-
-    def __init__(self, cv=4):
-        self.cv = cv
-
-    def fit(self, X, y):
-        self.n_features_in_ = X.shape[1]
-
-        cv = KFold(
-            n_splits=self.cv,
-            shuffle=True,
-            random_state=RANDOM_STATE
-        )
-
-        # Standardization makes coefficient
-        # magnitudes comparable during RFE.
-        self.scaler_ = StandardScaler()
-        X_scaled = self.scaler_.fit_transform(X)
-
-        selector = RFECV(
-            estimator=LinearRegression(),
-            step=1,
-            min_features_to_select=1,
-            cv=cv,
-            scoring=SCORING
-        )
-
-        selector.fit(X_scaled, y)
-
-        self.selected_indices_ = np.where(
-            selector.support_
-        )[0]
-
-        return self
-
-
-# ============================================================
-# M5: LASSO FEATURE SELECTION
-# ============================================================
-
-class LassoSelector(BaseSubsetSelector):
-
-    def __init__(self, cv=4):
-        self.cv = cv
-
-    def fit(self, X, y):
-        self.n_features_in_ = X.shape[1]
-
-        self.scaler_ = StandardScaler()
-
-        X_scaled = self.scaler_.fit_transform(X)
-
-        lasso = LassoCV(
-            cv=KFold(
-                n_splits=self.cv,
-                shuffle=True,
-                random_state=RANDOM_STATE
-            ),
-            max_iter=100000,
-            random_state=RANDOM_STATE
-        )
-
-        lasso.fit(X_scaled, y)
-
-        coefficients = np.abs(lasso.coef_)
-
-        indices = np.where(
-            coefficients > 1e-7
-        )[0]
-
-        # Ensure at least one feature is selected.
-        if len(indices) == 0:
-            indices = np.array([
-                np.argmax(coefficients)
-            ])
-
-        self.selected_indices_ = indices
-
-        return self
-
-
-# ============================================================
-# STEP 4: MODELING
-# ============================================================
-
-print("\n" + "=" * 65)
-print("STEP 4: MODELING")
-print("=" * 65)
-
-models = {
-    "Baseline": Pipeline([("regressor", LinearRegression())]),
-    **{
-        name: Pipeline([
-            ("selector", TunedCountSelector(method=name, cv=INNER_FOLDS)),
-            ("regressor", LinearRegression())
-        ])
-        for name in ("Correlation", "Mutual Information", "RFE")
-    },
-    "RFECV": Pipeline([
-        ("selector", RFECVSelector(cv=INNER_FOLDS)),
-        ("regressor", LinearRegression())
-    ]),
-    "LASSO": Pipeline([
-        ("selector", LassoSelector(cv=INNER_FOLDS)),
-        ("regressor", LinearRegression())
-    ])
-}
-
-
-# ============================================================
-# STEP 5: EVALUATION
-# ============================================================
-
-print("\n" + "=" * 65)
-print("STEP 5: MODEL EVALUATION")
-print("=" * 65)
-
-def calculate_metrics(y_true, y_pred, p):
-    n = len(y_true)
-
-    mae = mean_absolute_error(y_true, y_pred)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(y_true, y_pred)
-
-    if n > p + 1:
-        adj_r2 = 1 - (
-            (1 - r2) * (n - 1) / (n - p - 1)
-        )
-    else:
-        adj_r2 = np.nan
-
-    return mae, mse, rmse, r2, adj_r2
-
-
-results = []
-selected_features_dict = {}
-fitted_models = {}
-test_predictions = {}
-
-for name, pipeline in models.items():
-
-    print("\n" + "-" * 55)
-    print("Model:", name)
-    print("-" * 55)
-
-    # Nested CV:
-    # Outer folds evaluate the complete workflow.
-    # Inner folds perform feature selection.
-    cv_scores = cross_val_score(
-        clone(pipeline),
-        X_train,
-        y_train,
-        cv=outer_cv,
-        scoring=SCORING,
-        n_jobs=1
-    )
-
-    cv_rmse = -cv_scores.mean()
-    cv_std = (-cv_scores).std()
-
-    # Fit on the complete training set
-    fitted = clone(pipeline)
-    fitted.fit(X_train, y_train)
-
-    fitted_models[name] = fitted
-
-    # Extract selected features
-    if name == "Baseline":
-        selected = feature_names
-    else:
-        mask = fitted.named_steps[
-            "selector"
-        ].get_support()
-
-        selected = list(
-            np.array(feature_names)[mask]
-        )
-
-    selected_features_dict[name] = selected
-
-    p = len(selected)
-
-    # Predictions
-    y_train_pred = fitted.predict(X_train)
-    y_test_pred = fitted.predict(X_test)
-
-    test_predictions[name] = y_test_pred
-
-    train_metrics = calculate_metrics(
-        y_train,
-        y_train_pred,
-        p
-    )
-
-    test_metrics = calculate_metrics(
-        y_test,
-        y_test_pred,
-        p
-    )
-
-    results.append({
-        "Model": name,
-        "Features": p,
-        "CV RMSE": cv_rmse,
-        "CV Std": cv_std,
-        "Train RMSE": train_metrics[2],
-        "Test MAE": test_metrics[0],
-        "Test MSE": test_metrics[1],
-        "Test RMSE": test_metrics[2],
-        "Test R2": test_metrics[3],
-        "Test Adjusted R2": test_metrics[4]
-    })
-
-    print("Selected Features:", selected)
-    print("Number of Features:", p)
-    print("Nested CV RMSE:", round(cv_rmse, 4))
-    print("Test RMSE:", round(test_metrics[2], 4))
-    print("Test R2:", round(test_metrics[3], 4))
-
-
-# ============================================================
-# MODEL COMPARISON
-# ============================================================
-
-comparison_df = pd.DataFrame(results)
-
-# Rank by training-only nested CV RMSE
-comparison_df = comparison_df.sort_values(
-    "CV RMSE",
-    ascending=True
-).reset_index(drop=True)
-
-comparison_df.insert(
-    0,
-    "Rank",
-    np.arange(1, len(comparison_df) + 1)
-)
-
-print("\n" + "=" * 65)
-print("FINAL MODEL COMPARISON")
-print("=" * 65)
-
-print(
-    comparison_df.round(4).to_string(index=False)
-)
-
-comparison_df.to_csv(
-    OUTPUT_DIR / "model_comparison.csv",
-    index=False
-)
-
-selected_df = pd.DataFrame([
-    {
-        "Model": name,
-        "Selected Features": ", ".join(features),
-        "Feature Count": len(features)
-    }
-    for name, features in selected_features_dict.items()
-])
-
-selected_df.to_csv(
-    OUTPUT_DIR / "selected_features.csv",
-    index=False
-)
-
-print("\n===== SELECTED FEATURES =====")
-print(selected_df.to_string(index=False))
-
-
-# ============================================================
-# BEST MODEL
-# ============================================================
-
-best_name = comparison_df.iloc[0]["Model"]
-best_model = fitted_models[best_name]
-
-print("\nBEST MODEL BY NESTED CV:")
-print(best_name)
-
-print("\nSelected Features:")
-print(selected_features_dict[best_name])
-
-print("\nTest Performance:")
-best_row = comparison_df.iloc[0]
-
-print("MAE:", best_row["Test MAE"])
-print("MSE:", best_row["Test MSE"])
-print("RMSE:", best_row["Test RMSE"])
-print("R2:", best_row["Test R2"])
-
-
-# ============================================================
-# VISUALIZATION: MODEL COMPARISON
-# ============================================================
-
-# Select each subset using training data only. Test metrics are descriptive;
-# the best model above remains selected by nested training CV.
-comparison_algorithms = [
-    "Correlation", "Mutual Information", "RFE", "RFECV", "LASSO"
-]
-styles = [
-    {"color": "#1f77b4", "marker": "o"},
-    {"color": "#008b6b", "marker": "s"},
-    {"color": "#d97706", "marker": "^"},
-    {"color": "#8a3ffc", "marker": "D"},
-    {"color": "#d32f2f", "marker": "v"}
-]
-k_vals = list(range(1, X_train.shape[1] + 1))
-curve_rows = []
-for algo_name in comparison_algorithms:
-    for k in k_vals:
-        selector = FixedCountSelector(algo_name, k, INNER_FOLDS).fit(X_train, y_train)
-        indices = selector.selected_indices_
-
-        feats = X_train.columns[list(indices)].tolist()
-        regressor = LinearRegression().fit(X_train[feats], y_train)
-        predicted = regressor.predict(X_test[feats])
-        curve_rows.append({
-            "Model": algo_name,
-            "Features": k,
-            "Selected Features": ", ".join(feats),
-            "Test RMSE": np.sqrt(mean_squared_error(y_test, predicted)),
-            "Test R2": r2_score(y_test, predicted)
-        })
-
-curve_df = pd.DataFrame(curve_rows)
-curve_df.to_csv(OUTPUT_DIR / "feature_count_metrics.csv", index=False)
-
+from sklearn.preprocessing import StandardScaler
 from dashboard_export import export_dashboard
-export_dashboard(curve_df, X_train, X_test, y_train, y_test, comparison_df)
-print("\n===== METRICS BY NUMBER OF FEATURES =====")
-print(curve_df.round(4).to_string(index=False))
 
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5.5))
-for algo_name, style in zip(comparison_algorithms, styles):
-    points = curve_df[curve_df["Model"] == algo_name]
-    label = {"RFECV": "RFECV (RFE path)", "LASSO": "LASSO (coefficient ranking)"}.get(
-        algo_name, algo_name
-    )
-    for ax, metric in ((ax1, "Test RMSE"), (ax2, "Test R2")):
-        ax.plot(points["Features"], points[metric], label=label,
-                linewidth=2, markersize=6, **style)
-
-# Left plot: RMSE by Number of Features
-ax1.set_title("RMSE by Number of Features \u2014 All 5 Algorithms", fontsize=13, fontweight="bold", pad=12)
-ax1.set_xlabel("Number of Features", fontsize=11, fontweight="bold")
-ax1.set_ylabel("RMSE ($)", fontsize=11, fontweight="bold")
-ax1.set_xticks(k_vals)
-ax1.grid(True, linestyle="--", alpha=0.4, color="#d0d0d0")
-ax1.legend(loc="upper left", frameon=True, fontsize=9)
-
-# Right plot: R-squared by Number of Features
-ax2.set_title("R-squared by Number of Features \u2014 All 5 Algorithms", fontsize=13, fontweight="bold", pad=12)
-ax2.set_xlabel("Number of Features", fontsize=11, fontweight="bold")
-ax2.set_ylabel("R-squared", fontsize=11, fontweight="bold")
-ax2.set_xticks(k_vals)
-ax2.grid(True, linestyle="--", alpha=0.4, color="#d0d0d0")
-ax2.legend(loc="lower left", frameon=True, fontsize=9)
-
-plt.tight_layout()
-plt.savefig(
-    OUTPUT_DIR / "model_comparison.png",
-    dpi=200,
-    bbox_inches="tight"
-)
-plt.show()
+ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = ROOT / "results"
+RANDOM_STATE = 0
+INNER_FOLDS, OUTER_FOLDS = 4, 5
+SCORING = "neg_root_mean_squared_error"
+METHODS = ["Linear Regression", "Ridge", "Lasso", "Elastic Net", "Random Forest"]
 
 
-# ============================================================
-# ACTUAL VS PREDICTED - BEST MODEL
-# ============================================================
-
-best_test_pred = best_model.predict(X_test)
-
-plt.figure(figsize=(7, 5))
-
-plt.scatter(
-    y_test,
-    best_test_pred,
-    alpha=0.8
-)
-
-minimum = min(y_test.min(), best_test_pred.min())
-maximum = max(y_test.max(), best_test_pred.max())
-
-plt.plot(
-    [minimum, maximum],
-    [minimum, maximum],
-    "r--"
-)
-
-plt.xlabel("Actual Profit")
-plt.ylabel("Predicted Profit")
-plt.title(f"Actual vs Predicted - {best_name}")
-
-plt.tight_layout()
-plt.savefig(
-    OUTPUT_DIR / "actual_vs_predicted.png",
-    dpi=200
-)
-plt.show()
+def prepare_data():
+    df = pd.read_csv(ROOT / "50_Startups.csv")
+    df.columns = df.columns.str.strip()
+    columns = ["R&D Spend", "Administration", "Marketing Spend", "State", "Profit"]
+    if not set(columns).issubset(df.columns):
+        raise ValueError("Missing dataset columns")
+    df = df[columns].drop_duplicates().dropna().copy()
+    states = ["California", "Florida", "New York"]
+    if not df["State"].isin(states).all():
+        raise ValueError("Unexpected State category")
+    df["State"] = pd.Categorical(df["State"], categories=states)
+    X = pd.get_dummies(df.drop(columns="Profit"), columns=["State"], drop_first=True, dtype=float)
+    return train_test_split(X, df["Profit"], test_size=.2, random_state=RANDOM_STATE)
 
 
-# ============================================================
-# REGRESSION ASSUMPTION TESTS
-# ============================================================
-
-print("\n" + "=" * 65)
-print("REGRESSION ASSUMPTION CHECKS - BEST MODEL")
-print("=" * 65)
-
-# Diagnostics use training data.
-train_pred = best_model.predict(X_train)
-residuals = y_train.to_numpy() - train_pred
-
-selected_features = selected_features_dict[best_name]
-
-X_selected = X_train[selected_features].astype(float)
-
-X_design = sm.add_constant(
-    X_selected,
-    has_constant="add"
-)
-
-# ------------------------------------------------------------
-# 1. LINEARITY
-# ------------------------------------------------------------
-
-print("\n1. LINEARITY")
-
-plt.figure(figsize=(7, 5))
-plt.scatter(train_pred, residuals)
-plt.axhline(0, color="red", linestyle="--")
-
-plt.xlabel("Fitted Values")
-plt.ylabel("Residuals")
-plt.title("Residuals vs Fitted Values")
-
-plt.tight_layout()
-plt.savefig(
-    OUTPUT_DIR / "linearity.png",
-    dpi=200
-)
-plt.show()
-
-print("Inspect for systematic nonlinear patterns.")
-
-
-# ------------------------------------------------------------
-# 2. INDEPENDENCE
-# ------------------------------------------------------------
-
-print("\n2. INDEPENDENCE")
-
-dw = durbin_watson(residuals)
-
-print("Durbin-Watson:", round(dw, 4))
-print("Values near 2 suggest little serial correlation.")
-print("Meaningful ordering is required for interpretation.")
-
-
-# ------------------------------------------------------------
-# 3. NORMALITY
-# ------------------------------------------------------------
-
-print("\n3. NORMALITY")
-
-stat, p_value = shapiro(residuals)
-
-print("Shapiro-Wilk p-value:", round(p_value, 4))
-
-if p_value > 0.05:
-    print("Normality not rejected.")
-else:
-    print("Evidence against normality.")
-
-stats = sm.ProbPlot(residuals)
-stats.qqplot(line="45")
-
-plt.title("Q-Q Plot")
-plt.tight_layout()
-plt.savefig(
-    OUTPUT_DIR / "normality.png",
-    dpi=200
-)
-plt.show()
-
-
-# ------------------------------------------------------------
-# 4. HOMOSCEDASTICITY
-# ------------------------------------------------------------
-
-print("\n4. HOMOSCEDASTICITY")
-
-bp = het_breuschpagan(
-    residuals,
-    X_design
-)
-
-print("Breusch-Pagan p-value:", round(bp[1], 4))
-
-if bp[1] > 0.05:
-    print("Constant variance not rejected.")
-else:
-    print("Evidence of nonconstant variance.")
-
-
-# ------------------------------------------------------------
-# 5. MULTICOLLINEARITY
-# ------------------------------------------------------------
-
-print("\n5. MULTICOLLINEARITY")
-
-vif_values = []
-
-for i, feature in enumerate(selected_features):
-    vif = variance_inflation_factor(
-        X_design.to_numpy(),
-        i + 1
+def make_search(method, k=None):
+    estimators = {
+        "Linear Regression": LinearRegression(),
+        "Ridge": Ridge(),
+        "Lasso": Lasso(max_iter=100000),
+        "Elastic Net": ElasticNet(max_iter=100000),
+        "Random Forest": RandomForestRegressor(
+            n_estimators=60, min_samples_leaf=2, random_state=RANDOM_STATE, n_jobs=1
+        )
+    }
+    grids = {
+        "Linear Regression": {},
+        "Ridge": {"regressor__alpha": [.01, .1, 1, 10, 100]},
+        "Lasso": {"regressor__alpha": [1, 10, 100, 1000, 5000]},
+        "Elastic Net": {"regressor__alpha": [.01, .1, 1, 10], "regressor__l1_ratio": [.2, .8]},
+        "Random Forest": {"regressor__max_depth": [3, None]}
+    }
+    pipeline = Pipeline([
+        ("selector", SelectKBest(f_regression, k=5 if k is None else k)),
+        ("scaler", "passthrough" if method == "Random Forest" else StandardScaler()),
+        ("regressor", estimators[method])
+    ])
+    grid = dict(grids[method])
+    if k is None:
+        grid["selector__k"] = [1, 2, 3, 4, 5]
+    return GridSearchCV(
+        pipeline, grid, scoring=SCORING,
+        cv=KFold(INNER_FOLDS, shuffle=True, random_state=RANDOM_STATE),
+        n_jobs=1, error_score="raise"
     )
 
-    vif_values.append({
-        "Feature": feature,
-        "VIF": vif
-    })
 
-vif_df = pd.DataFrame(vif_values)
-
-print(vif_df.to_string(index=False))
-
-vif_df.to_csv(
-    OUTPUT_DIR / "vif_results.csv",
-    index=False
-)
+def metrics(fitted, X_train, X_test, y_train, y_test):
+    pred = fitted.predict(X_test)
+    return {"Train RMSE": float(np.sqrt(mean_squared_error(y_train, fitted.predict(X_train)))),
+            "Test MAE": float(mean_absolute_error(y_test, pred)),
+            "Test MSE": float(mean_squared_error(y_test, pred)),
+            "Test RMSE": float(np.sqrt(mean_squared_error(y_test, pred))),
+            "Test R2": float(r2_score(y_test, pred))}
 
 
-# ============================================================
-# REGRESSION COEFFICIENTS
-# ============================================================
+def main():
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    X_train, X_test, y_train, y_test = prepare_data()
+    feature_names = X_train.columns.to_numpy()
+    outer = KFold(OUTER_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    comparisons, curves, fitted_curves, fitted_models = [], [], {}, {}
+    print("50 STARTUPS: FIVE PREDICTIVE MODELS", flush=True)
+    print(f"Train={len(y_train)}, Test={len(y_test)}, seed={RANDOM_STATE}", flush=True)
+    for method in METHODS:
+        print(f"\nModel: {method} — nested CV", flush=True)
+        search = make_search(method)
+        outer_rmse = -cross_val_score(clone(search), X_train, y_train, cv=outer, scoring=SCORING)
+        search.fit(X_train, y_train)
+        fitted = search.best_estimator_
+        fitted_models[method] = fitted
+        feats = feature_names[fitted.named_steps["selector"].get_support()].tolist()
+        comparisons.append({
+            "Model": method, "Features": len(feats), "Selected Features": ", ".join(feats),
+            "CV RMSE": float(outer_rmse.mean()), "CV Std": float(outer_rmse.std()),
+            "Best Parameters": json.dumps(search.best_params_),
+            **metrics(fitted, X_train, X_test, y_train, y_test)
+        })
+        for k in range(1, 6):
+            fixed = make_search(method, k).fit(X_train, y_train)
+            fixed_model = fixed.best_estimator_
+            fitted_curves[(method, k)] = fixed_model
+            features = feature_names[fixed_model.named_steps["selector"].get_support()].tolist()
+            curves.append({"Model": method, "Features": k,
+                           "Selected Features": ", ".join(features),
+                           "Tuning CV RMSE": float(-fixed.best_score_),
+                           "Best Parameters": json.dumps(fixed.best_params_),
+                           **metrics(fixed_model, X_train, X_test, y_train, y_test)})
+        print(f"Nested CV RMSE={outer_rmse.mean():.2f}; selected features={feats}", flush=True)
 
-print("\n===== BEST MODEL COEFFICIENTS =====")
+    comparison = pd.DataFrame(comparisons).sort_values("CV RMSE").reset_index(drop=True)
+    comparison.insert(0, "Rank", np.arange(1, len(comparison) + 1))
+    curve_df = pd.DataFrame(curves)
+    comparison.to_csv(OUTPUT_DIR / "model_comparison.csv", index=False)
+    curve_df.to_csv(OUTPUT_DIR / "feature_count_metrics.csv", index=False)
+    comparison[["Model", "Selected Features", "Features"]].rename(
+        columns={"Features": "Feature Count"}
+    ).to_csv(OUTPUT_DIR / "selected_features.csv", index=False)
+    best_name = comparison.iloc[0]["Model"]
+    best_model = fitted_models[best_name]
+    best_features = feature_names[best_model.named_steps["selector"].get_support()].tolist()
+    predictions = best_model.predict(X_test)
+    pd.DataFrame({"Sample ID": y_test.index + 1, "Actual Profit": y_test,
+                  "Predicted Profit": predictions, "Residual": y_test - predictions}).to_csv(
+        OUTPUT_DIR / "best_model_predictions.csv", index=False)
+    joblib.dump(dict(model=best_model, model_name=best_name, feature_names=list(feature_names),
+                     selected_features=best_features), OUTPUT_DIR / "best_startup_model.pkl")
+    joblib.dump(fitted_curves, OUTPUT_DIR / "dashboard_models.pkl")
+    export_dashboard(curve_df, fitted_curves, X_train, X_test, y_train, y_test, comparison, best_name)
 
-best_regressor = best_model.named_steps["regressor"]
+    colors = ["#5585ef", "#09ad87", "#e7a43c", "#9c68db", "#e16a87"]
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    for method, color, marker in zip(METHODS, colors, ["o", "s", "^", "D", "v"]):
+        rows = curve_df[curve_df["Model"] == method]
+        for ax, metric, title in zip(axes, ["Test RMSE", "Test R2"], ["Test RMSE", "Test R-squared"]):
+            ax.plot(rows["Features"], rows[metric], label=method, color=color, marker=marker, linewidth=2)
+            ax.set(title=f"{title} by Number of Features — 5 Predictive Models", xlabel="Number of Features", ylabel=metric)
+            ax.set_xticks(range(1, 6))
+            ax.grid(alpha=.25, linestyle="--")
+            ax.legend(fontsize=9)
+    fig.tight_layout()
+    fig.savefig(OUTPUT_DIR / "model_comparison.png", dpi=200)
+    plt.close(fig)
+    fig, ax = plt.subplots(figsize=(7, 5))
+    ax.scatter(y_test, predictions)
+    limits = [min(y_test.min(), predictions.min()), max(y_test.max(), predictions.max())]
+    ax.plot(limits, limits, "r--")
+    ax.set(xlabel="Actual Profit", ylabel="Predicted Profit", title=f"Actual vs Predicted — {best_name}")
+    fig.tight_layout()
+    fig.savefig(OUTPUT_DIR / "actual_vs_predicted.png", dpi=200)
+    plt.close(fig)
+    new = pd.DataFrame({"R&D Spend": [150000], "Administration": [120000],
+                        "Marketing Spend": [250000], "State_Florida": [0.], "State_New York": [0.]})
+    print("\nFINAL MODEL COMPARISON\n" + comparison.round(4).to_string(index=False), flush=True)
+    print(f"Best by nested CV: {best_name}", flush=True)
+    print(f"New startup prediction: {best_model.predict(new[X_train.columns])[0]:.2f}", flush=True)
+    print("CRISP-DM PROJECT COMPLETED!", flush=True)
 
-coef_df = pd.DataFrame({
-    "Feature": selected_features,
-    "Coefficient": best_regressor.coef_
-})
 
-print("Intercept:", best_regressor.intercept_)
-print(coef_df.to_string(index=False))
-
-coef_df.to_csv(
-    OUTPUT_DIR / "best_model_coefficients.csv",
-    index=False
-)
-
-
-# ============================================================
-# STEP 6: DEPLOYMENT
-# ============================================================
-
-print("\n" + "=" * 65)
-print("STEP 6: DEPLOYMENT")
-print("=" * 65)
-
-new_startup = pd.DataFrame({
-    "R&D Spend": [150000],
-    "Administration": [120000],
-    "Marketing Spend": [250000],
-    "State_Florida": [0.0],
-    "State_New York": [0.0]
-})
-
-# California is the reference state.
-new_startup = new_startup[feature_names]
-
-prediction = best_model.predict(new_startup)
-
-print("\nNew Startup:")
-print(new_startup)
-
-print("\nPredicted Profit:", round(prediction[0], 2))
-
-joblib.dump(
-    {
-        "model": best_model,
-        "feature_names": feature_names,
-        "selected_features": selected_features,
-        "model_name": best_name
-    },
-    OUTPUT_DIR / "best_startup_model.pkl"
-)
-
-predictions_df = pd.DataFrame({
-    "Actual Profit": y_test.to_numpy(),
-    "Predicted Profit": best_test_pred,
-    "Residual": y_test.to_numpy() - best_test_pred
-})
-
-predictions_df.to_csv(
-    OUTPUT_DIR / "best_model_predictions.csv",
-    index=False
-)
-
-print("\nAll results saved to:", OUTPUT_DIR.resolve())
-print("\nCRISP-DM PROJECT COMPLETED!")
+if __name__ == "__main__":
+    main()
