@@ -1,0 +1,30 @@
+{
+  "id": "boston",
+  "title": "Boston Housing",
+  "problem": "Boston Housing：房價預測",
+  "target": "MEDV",
+  "targetLabel": "房價中位數",
+  "unit": "千美元",
+  "unitPrefix": "",
+  "rawSize": 506,
+  "source": "https://www.kaggle.com/datasets/altavish/boston-housing-dataset",
+  "sampleLabel": "Housing",
+  "description": "以住宅、環境與區域特徵，預測 Boston Housing 的房價中位數。",
+  "missingPolicy": "移除有缺失值的列，再進行固定的 80% / 20% 分割；不以測試資料補值。",
+  "fieldLabels": {
+    "CRIM": "CRIM · 人均犯罪率",
+    "ZN": "ZN · 大面積住宅用地比例",
+    "INDUS": "INDUS · 非零售商業用地比例",
+    "CHAS": "CHAS · 是否鄰近 Charles River",
+    "NOX": "NOX · 氮氧化物濃度",
+    "RM": "RM · 平均房間數",
+    "AGE": "AGE · 老屋比例",
+    "DIS": "DIS · 就業中心加權距離",
+    "RAD": "RAD · 高速公路可及性指數",
+    "TAX": "TAX · 財產稅率",
+    "PTRATIO": "PTRATIO · 師生比",
+    "B": "B · 原始資料 B 指標",
+    "LSTAT": "LSTAT · 原始資料低社經族群比例"
+  },
+  "targetNote": "MEDV 單位為千美元，30 代表 30,000 美元；為歷史資料中的區域房價中位數。"
+}

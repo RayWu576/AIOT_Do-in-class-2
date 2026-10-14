@@ -11,7 +11,7 @@ from sklearn.metrics import mean_absolute_error
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 
-def export_dashboard(curves, X_train, X_test, y_train, y_test, comparison):
+def export_dashboard(curves, X_train, X_test, y_train, y_test, comparison, dataset_id="startups", metadata=None):
     models = []
     for _, row in curves.iterrows():
         features = row["Selected Features"].split(", ")
@@ -52,7 +52,38 @@ def export_dashboard(curves, X_train, X_test, y_train, y_test, comparison):
     )
     output = Path(__file__).resolve().parent / "dashboard" / "dist"
     output.mkdir(parents=True, exist_ok=True)
-    encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    metadata = dict(metadata or {
+        "id": "startups", "title": "50 Startups", "problem": "50 Startups：公司利潤預測",
+        "target": "Profit", "targetLabel": "公司利潤", "unit": "美元", "unitPrefix": "$",
+        "rawSize": 50, "sampleLabel": "Startup", "source": "50_Startups.csv",
+        "description": "從研發、行銷、行政投入與所在地，探索新創公司的利潤預測。",
+        "missingPolicy": "移除重複與缺失資料列，再進行固定 80% / 20% 分割。",
+        "targetNote": "Profit 單位為美元。",
+        "fieldLabels": {"R&D Spend": "研發投入", "Marketing Spend": "行銷投入", "Administration": "行政支出"}
+    })
+    metadata["cleanSize"] = len(y_train) + len(y_test)
+    metadata["maxFeatures"] = X_train.shape[1]
+    inputs = []
+    for name in X_train.columns:
+        if name.startswith("State_"):
+            continue
+        col = X_train[name]
+        span = float(col.max() - col.min())
+        binary = col.nunique() <= 2 and set(col.unique()).issubset({0., 1.})
+        integer = bool(np.allclose(col, np.round(col)))
+        step = 1. if binary or integer else float(10 ** np.floor(np.log10(max(span, 1e-9) / 1000)))
+        inputs.append(dict(name=name, label=metadata.get("fieldLabels", {}).get(name, name),
+                           default=float(col.median()), min=float(col.min()), max=float(col.max()),
+                           step=step, binary=binary))
+    recommended = next(row for row in comparison.to_dict(orient="records") if row["Model"] != "Baseline")
+    payload.update(metadata=metadata, inputs=inputs,
+                   defaultMethod=recommended["Model"], defaultK=int(recommended["Features"]))
+    existing = json.loads((output / "data.json").read_text(encoding="utf-8")) if (output / "data.json").exists() else {}
+    datasets = dict(existing.get("datasets", {}))
+    datasets[dataset_id] = payload
+    startup = datasets.get("startups", payload)
+    bundle = {**startup, "schemaVersion": 3, "datasets": datasets}
+    encoded = json.dumps(bundle, ensure_ascii=False, allow_nan=False)
     (output / "data.json").write_text(encoded, encoding="utf-8")
     (output / "data.js").write_text("window.DASHBOARD_DATA = " + encoded + ";\n", encoding="utf-8")
     refresh_asset_versions(output)

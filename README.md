@@ -38,3 +38,21 @@ The two-panel `results/model_comparison.png` shows test RMSE and R-squared for 1
 前一次五個預測模型的實驗結果保留於 `results/previous_predictive_models/`，不與目前結果混用。
 
 安裝 `requirements.txt` 後執行 `python main.py` 更新結果。安裝 Playwright 與 Microsoft Edge 後，可執行 `python tests/verify_dashboard.py` 檢查 25 組特徵子集、Python／網站數值及互動功能。
+
+
+## 問題下拉選單：Boston Housing
+
+首頁可切換「50 Startups：公司利潤預測」與「Boston Housing：房價預測」，五種特徵選擇方法保持不變。模型、圖表、係數、預測輸入、單位與殘差會同步切換。切換資料集會清除情境比較，避免混合不同單位。
+
+Boston 原始資料來自使用者指定的 [Kaggle / altavish / Boston Housing Dataset](https://www.kaggle.com/datasets/altavish/boston-housing-dataset)，保存於 `datasets/boston_housing/HousingData.csv`。506 筆、13 個輸入欄位、MEDV 目標；此版本 CRIM、ZN、INDUS、CHAS、AGE、LSTAT 各有 20 筆缺值。採完整資料列分析，清理後 394 筆，固定 seed=0 分割為 315 筆訓練、79 筆測試。未使用其他版本替代或人工填入數據。
+
+MEDV 的單位為千美元，例如 30 代表 30,000 美元。這是歷史區域房價中位數，不能當作當前單一物件估價。
+
+- `python main.py`：依序更新兩個資料集。
+- `python housing_experiment.py`：只重跑 Boston Housing。
+- Boston 的結果在 `results/boston_housing/`；50 Startups 的結果仍在 `results/`。
+- 兩個問題各自做相同的外層 5 折、內層 4 折交叉驗證。Boston 產生 65 組固定 k 結果（5 方法 × 13 特徵數）。
+- 網站使用 `data.json` 的 `datasets.startups` 與 `datasets.boston`，保留頂層 startups 欄位相容舊驗證流程。重新執行任何一個問題會保留另一問題的已匯出資料。
+- 未選用的預測欄位會淡化；Boston 的 CHAS 限制為 0 或 1。測試殘差每頁 20 筆，可排序與換頁。
+
+執行 `python tests/verify_housing.py` 檢查來源缺失值與清理筆數、65 組 Python／網站一致性、資料集切換、單位、預測輸入、CSV、分頁及手機版面。
