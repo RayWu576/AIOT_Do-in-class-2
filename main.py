@@ -1,3 +1,10 @@
+# Optional reusable-engine entry point; no arguments preserves historical runs.
+import sys
+if __name__ == "__main__" and len(sys.argv) > 1:
+    from regression.cli import main as analyze_dataset
+    analyze_dataset()
+    sys.exit(0)
+
 
 # ============================================================
 # 50 STARTUPS - MULTIPLE LINEAR REGRESSION

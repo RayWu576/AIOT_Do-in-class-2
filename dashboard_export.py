@@ -97,10 +97,10 @@ def refresh_asset_versions(output=None):
     if not index.exists():
         return
     versions = {name: hashlib.sha256((output / name).read_bytes()).hexdigest()[:12]
-                for name in ("app.js", "data.js", "styles.css")}
+                for name in ("app.js", "data.js", "styles.css", "upload.js") if (output / name).exists()}
     text = index.read_text(encoding="utf-8")
     text = re.sub(
-        r'((?:src|href)=")(app\.js|data\.js|styles\.css)(?:\?v=[^"]*)?(")',
+        r'((?:src|href)=")(app\.js|data\.js|styles\.css|upload\.js)(?:\?v=[^"]*)?(")',
         lambda match: f'{match[1]}{match[2]}?v={versions[match[2]]}{match[3]}', text
     )
     index.write_text(text, encoding="utf-8")

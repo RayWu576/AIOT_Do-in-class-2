@@ -2,8 +2,8 @@
 import numpy as np
 import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.model_selection import KFold, cross_val_score
-from sklearn.linear_model import LinearRegression, LassoCV
+from sklearn.model_selection import KFold, cross_val_score, GridSearchCV
+from sklearn.linear_model import LinearRegression, LassoCV, Lasso
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_selection import mutual_info_regression, RFECV, RFE
 from sklearn.pipeline import Pipeline
@@ -52,10 +52,12 @@ class FixedCountSelector(BaseSubsetSelector):
     fixed-k RFE elimination path; RFECV itself selects k by cross-validation.
     """
 
-    def __init__(self, method="Correlation", k=1, cv=4):
+    def __init__(self, method="Correlation", k=1, cv=4, random_state=0, strict_cv=False):
         self.method = method
         self.k = k
         self.cv = cv
+        self.random_state = random_state
+        self.strict_cv = strict_cv
 
     def fit(self, X, y):
         self.n_features_in_ = X.shape[1]
@@ -78,7 +80,7 @@ class FixedCountSelector(BaseSubsetSelector):
             # The two one-hot State columns are discrete features.
             discrete = np.array([np.unique(values[:, i]).size <= 2 for i in range(values.shape[1])])
             scores = mutual_info_regression(
-                values, y, discrete_features=discrete, random_state=RANDOM_STATE
+                values, y, discrete_features=discrete, random_state=self.random_state
             )
         elif self.method in ("RFE", "RFECV"):
             scaled = StandardScaler().fit_transform(values)
@@ -86,6 +88,16 @@ class FixedCountSelector(BaseSubsetSelector):
             selector.fit(scaled, y)
             self.selected_indices_ = np.flatnonzero(selector.support_)
             return self
+        elif self.method == "LASSO" and self.strict_cv:
+            # Scale independently inside every Lasso tuning fold.
+            scale=float(np.std(y)) or 1.
+            search=GridSearchCV(
+                Pipeline([('scaler',StandardScaler()),('lasso',Lasso(max_iter=20000))]),
+                {'lasso__alpha':scale*np.array([.0001,.001,.01,.1,1.])},
+                cv=KFold(self.cv,shuffle=True,random_state=self.random_state),
+                scoring=SCORING,error_score='raise'
+            ).fit(values,y)
+            scores=np.abs(search.best_estimator_.named_steps['lasso'].coef_)
         elif self.method == "LASSO":
             scaled = StandardScaler().fit_transform(values)
             lasso = LassoCV(
@@ -208,5 +220,3 @@ class LassoSelector(BaseSubsetSelector):
         self.selected_indices_ = indices
 
         return self
-
-
